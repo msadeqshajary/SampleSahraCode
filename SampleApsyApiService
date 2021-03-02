@@ -1,0 +1,170 @@
+using Stripe;
+using System;
+using System.Collections.Generic;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Apsy.Machine.Billing.Services
+{
+    public interface IStripeService
+    {
+        Task<Customer> CreateCustomer(string mail);
+        Task<Customer> GetCustomer(string customerId);
+        Task<IEnumerable<Customer>> GetCustomers(int limit = 10);
+        Task<SetupIntent> CreateSetupIntent(string customerId, string paymentMethodId, string customerName);
+        Task<SetupIntent> GetSetupIntent(string setupIntentId);
+        Task<PaymentMethod> CreatePaymentMethod(string card, int expMonth, int expYear, string cvc);
+        Task<PaymentIntent> PaymentCustomer(string customerId, string intentId, long amount);
+        Task<IEnumerable<PaymentIntent>> GetPayments(string customerId);
+    }
+
+    public class StripeService : IStripeService
+    {
+        static Dictionary<string, string> configs = Startup.GetKeyValuePairs();
+        private string API_KEY = configs["StripeApiKey"];
+
+        public StripeService()
+        {
+            StripeConfiguration.ApiKey = API_KEY;
+        }
+
+        public async Task<Customer> CreateCustomer(string mail)
+        {
+            var options = new CustomerCreateOptions
+            {
+                Email = mail
+            };
+            try
+            {
+                var service = new CustomerService();
+                return await service.CreateAsync(options);
+            }
+            catch (Exception e)
+            {
+                var msg = e.Message;
+                return null;
+            }
+
+        }
+
+        public async Task<Customer> GetCustomer(string customerId)
+        {
+            var service = new CustomerService();
+            return await service.GetAsync(customerId);
+        }
+
+        public async Task<IEnumerable<Customer>> GetCustomers(int limit = 10)
+        {
+            var options = new CustomerListOptions
+            {
+                Limit = limit
+            };
+            var service = new CustomerService();
+            StripeList<Customer> customers = await service.ListAsync(options);
+            return customers;
+        }
+
+        // Save Payment Info without pay
+        public async Task<SetupIntent> CreateSetupIntent(string customerId, string paymentMethodId, string customerName)
+        {
+            Dictionary<string, string> metaData = new Dictionary<string, string>();
+            metaData.Add("Name", customerName);
+            var options = new SetupIntentCreateOptions
+            {
+                PaymentMethodTypes = new List<string>
+                {
+                    "card"
+                },
+                Customer = customerId,
+                Confirm = true,
+                Usage = "off_session",
+                PaymentMethod = paymentMethodId,
+                Metadata = metaData
+            };
+
+            var service = new SetupIntentService();
+
+            return await service.CreateAsync(options);
+        }
+
+        public async Task<SetupIntent> GetSetupIntent(string setupIntentId)
+        {
+            var service = new SetupIntentService();
+            return await service.GetAsync(setupIntentId);
+        }
+
+        public async Task<PaymentMethod> CreatePaymentMethod(string card, int expMonth, int expYear, string cvc)
+        {
+            var options = new PaymentMethodCreateOptions
+            {
+                Type = "card",
+                Card = new PaymentMethodCardOptions
+                {
+                    Number = card,
+                    ExpMonth = expMonth,
+                    ExpYear = expYear,
+                    Cvc = cvc
+                }
+            };
+
+            var service = new PaymentMethodService();
+            try
+            {
+                return await service.CreateAsync(options);
+            }
+            catch (Exception e)
+            {
+                var msg = e.Message;
+                return null;
+            }
+
+        }
+
+        public async Task<PaymentIntent> PaymentCustomer(string customerId, string intentId, long amount)
+        {
+            if (string.IsNullOrEmpty(customerId) || string.IsNullOrEmpty(intentId))
+            {
+                return null;
+            }
+
+            var intent = await GetSetupIntent(intentId);
+            if (intent == null)
+            {
+                return null;
+            }
+
+            var paymentMethodId = intent.PaymentMethodId;
+            try
+            {
+                var service = new PaymentIntentService();
+                var options = new PaymentIntentCreateOptions
+                {
+                    Amount = amount,
+                    Currency = "usd",
+                    Customer = customerId,
+                    PaymentMethod = paymentMethodId,
+                    Confirm = true,
+                    OffSession = true
+                };
+                return await service.CreateAsync(options);
+            }
+            catch (StripeException e)
+            {
+                var msg = e.Message;
+                return null;
+            }
+        }
+
+        public async Task<IEnumerable<PaymentIntent>> GetPayments(string customerId)
+        {
+            var options = new PaymentIntentListOptions
+            {
+                Limit = 1000,
+                Customer = customerId
+            };
+            var service = new PaymentIntentService();
+            StripeList<PaymentIntent> paymentIntents = await service.ListAsync(options);
+            return paymentIntents;
+        }
+    }
+}
