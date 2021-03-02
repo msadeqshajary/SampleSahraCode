@@ -1,0 +1,313 @@
+using Apsy.Common.Models;
+using Apsy.Orchestra.Extensions;
+using Apsy.Orchestra.Services;
+using Apsy.Orchestra.Views;
+using Newtonsoft.Json;
+using Prism.Commands;
+using RestSharp;
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Threading.Tasks;
+using System.Windows;
+
+namespace Apsy.Orchestra.ViewModels
+{
+    public class AccountViewModel : ViewModelBase, INavigatable
+    {
+        private DocuSignAccessToken docuSignAccessToken;
+        private Project project;
+        private Account account;
+        private string sendContractMessage;
+
+        private bool showSendContractConfirmation;
+        private bool isProgressing;
+        private bool showSendContract;
+        private bool showAddCreditCard;
+        private bool showConfigurationNotCompleted;
+        private bool showNotSigned;
+        private bool showTestPaymenet;
+        private bool showHistory;
+
+        private RestClient client;
+
+        public DocuSignAccessToken DocuSignAccessToken
+        {
+            get => docuSignAccessToken;
+            set
+            {
+                SetProperty(ref docuSignAccessToken, value);
+                CheckAccount();
+            }
+        }
+
+        public bool ShowSendContractConfirmation { get => showSendContractConfirmation; set => SetProperty(ref showSendContractConfirmation, value); }
+        public bool IsProgressing { get => isProgressing; set => SetProperty(ref isProgressing, value); }
+        public bool ShowSendContract { get => showSendContract; set => SetProperty(ref showSendContract, value); }
+        public bool ShowAddCreditCard { get => showAddCreditCard; set => SetProperty(ref showAddCreditCard, value); }
+        public bool ShowConfigurationNotCompleted { get => showConfigurationNotCompleted; set => SetProperty(ref showConfigurationNotCompleted, value); }
+        public bool ShowNotSigned { get => showNotSigned; set => SetProperty(ref showNotSigned, value); }
+        public bool ShowHistory { get => showHistory; set => SetProperty(ref showHistory, value); }
+        public bool ShowTestPayment { get => showTestPaymenet;
+            set
+            {
+                SetProperty(ref showTestPaymenet, value);
+                ShowHistory = true;
+                Task.Run(() => UpdateHistory());
+            }
+        }
+
+        public string SendContractMessage { get => sendContractMessage; set => SetProperty(ref sendContractMessage, value); }
+
+        public Account Account { get => account; set => SetProperty(ref account, value); }
+
+        public DelegateCommand SendContractCommand { get; set; }
+        public DelegateCommand CancelSendContractCommand { get; set; }
+        public DelegateCommand ConfirmSendContractCommand { get; set; }
+        public DelegateCommand AddCreditCardCommand { get; set; }
+        public DelegateCommand ResendContractCommand { get; set; }
+        public DelegateCommand TestPaymentCommand { get; set; }
+
+        public ObservableCollection<string> Statuses { get; set; } = new ObservableCollection<string>();
+        public ObservableCollection<PaymentModel> Payments { get; set; } = new ObservableCollection<PaymentModel>();
+
+        public AccountViewModel(RestApiService restApiService, ConfigurationService configurationService)
+            : base(restApiService, configurationService)
+        {
+            SendContractCommand = new DelegateCommand(SendContract);
+            CancelSendContractCommand = new DelegateCommand(CancelSendContract);
+            ConfirmSendContractCommand = new DelegateCommand(ConfirmSendContract);
+            AddCreditCardCommand = new DelegateCommand(AddCreditCard);
+            ResendContractCommand = new DelegateCommand(SendContract);
+            TestPaymentCommand = new DelegateCommand(TestPayment);
+
+            string endpoint = configurationService.Get<string>(ConfigurationService.Keys.OrcServer);
+            client = new RestClient(endpoint);
+        }
+
+        private async void TestPayment()
+        {
+            var request = new RestRequest("api/contract/stripe/payment");
+            request.Method = Method.POST;
+            request.AddQueryParameter("amount", "100");
+            request.AddJsonBody(Account);
+
+            var response = await client.PostAsync<string>(request);
+
+            if (string.IsNullOrEmpty(response))
+            {
+                MessageBox.Show("There is an error in payment");
+            }
+            else
+            {
+                MessageBox.Show("Payment was processed successfully");
+                await UpdateHistory();
+                
+            }
+        }
+
+        private async Task UpdateHistory()
+        {
+            var requestPaymentsList = new RestRequest("api/contract/stripe/payment");
+            requestPaymentsList.Method = Method.GET;
+            requestPaymentsList.AddQueryParameter("customerId", Account.StripeCustomerId);
+            var listResponse = await client.GetAsync<IEnumerable<PaymentModel>>(requestPaymentsList);
+            Payments.Clear();
+            listResponse.AppendTo(Payments);
+        }
+
+        public class PaymentModel
+        {
+            public long Amount { get; set; }
+            public long AmountReceived { get; set; }
+            public DateTime? Created { get; set; }
+            public string Description { get; set; }
+            public string Id { get; set; }
+            public string ReceiptEmail { get; set; }
+            public string Status { get; set; }
+        }
+
+        private void AddCreditCard()
+        {
+            CreditCardDialog dialog = new CreditCardDialog(GetService<RestApiService>(), GetService<ConfigurationService>(),
+                Account.StripeCustomerId, project.Customer.Name);
+            dialog.Owner = Application.Current.MainWindow as MainWindow;
+            dialog.ShowDialog();
+
+            if(dialog.DialogResult == true)
+            {
+                dialog.Close();
+                ShowAddCreditCard = false;
+                ShowTestPayment = true;
+            }
+        }
+
+        private async void ConfirmSendContract()
+        {
+            ShowSendContractConfirmation = false;
+            AddStatus("Sending Contract...");
+            IsProgressing = true;
+            ShowSendContract = false;
+            var costRequest = new RestRequest("api/contract/calculate");
+            costRequest.AddQueryParameter("projectId", project.ProjectId.ToString());
+            int cost = client.Get<int>(costRequest).Data;
+
+            var data = new
+            {
+                signerMail = project.Customer.Email,
+                signerName = project.Customer.Name,
+                ccMail = project.Lead.Email,
+                ccName = project.Lead.Name,
+                cost = cost,
+                deliver = DateTime.UtcNow.AddDays(14).ToShortDateString(),
+                projectName = project.Name,
+                access = DocuSignAccessToken.access_token,
+                address = project.Customer.Address ?? string.Empty
+            };
+            var request = new RestRequest("api/contract/send");
+            request.Method = Method.POST;
+            request.AddQueryParameter("projectId", project.ProjectId.ToString());
+            request.AddJsonBody(data);
+
+            var response = await client.PostAsync<string>(request);
+
+            if (string.IsNullOrEmpty(response))
+            {
+                AddStatus("There is error in sending contract. Please try again");
+                IsProgressing = false;
+                ShowSendContract = true;
+            }
+            else
+            {
+                AddStatus("Contract Sent successfully. Please check your mail and sign the contract");
+                IsProgressing = false;
+            }
+        }
+
+        private void CancelSendContract()
+        {
+            ShowSendContractConfirmation = false;
+        }
+
+        private void SendContract()
+        {
+            SendContractMessage = $"The contract will be emailed to {project.Customer.Email}. Are you sure?";
+            ShowSendContractConfirmation = true;
+
+        }
+
+        private async void CheckAccount()
+        {
+            AddStatus("Checking Account...");
+            Account a = new Account
+            {
+                ProjectId = project.ProjectId
+            };
+
+            await RunAsync(() => GetService<RestApiService>().Post<Account>($"api/contract/account?mail={project.Customer.Email}", a)
+                .ContinueWith(response =>
+                {
+                    Account = response.Result.Data;
+                    GetEnvelopeStatus();
+                }));
+
+        }
+
+        private async void GetEnvelopeStatus()
+        {
+            if(Account == null)
+            {
+                AddStatus("There is an error in creating account.");
+                IsProgressing = false;
+                return;
+            }
+            if (string.IsNullOrEmpty(Account.EnvelopeId))
+            {
+                AddStatus("The contract has not been sent.");
+                ShowSendContract = true;
+                IsProgressing = false;
+            }
+            else
+            {
+                await RunAsync(() => GetService<RestApiService>().Get<Account>($"api/contract/envelope/status?envelopeId={account.EnvelopeId}" +
+                    $"&access={DocuSignAccessToken.access_token}&projectId={project.ProjectId}")
+                    .ContinueWith(res =>
+                    {
+                        if (account.EnvelopeStatus != "completed" && account.EnvelopeStatus != "signed")
+                        {
+                            ShowNotSigned = true;
+                            IsProgressing = false;
+                        }
+                        else
+                        {
+                            AddStatus("The contract has been sent and signed.");
+                            IsProgressing = false;
+
+                            if (string.IsNullOrEmpty(Account.SetupIntentId))
+                                ShowAddCreditCard = true;
+                            else ShowTestPayment = true;
+                        }
+                    }));
+            }
+        }
+
+        public void AddStatus(string msg)
+        {
+            Application.Current.Dispatcher.Invoke(new Action(() =>
+            {
+                Statuses.Add(msg);
+            }));
+        }
+
+        public void OnNavigatingFrom()
+        {
+
+        }
+
+        public async void OnNavigatedTo(params object[] state)
+        {
+            project = state[0] as Project;
+            IsProgressing = true;
+            if (string.IsNullOrEmpty(project.Configuration))
+            {
+
+                ShowConfigurationNotCompleted = true; 
+                IsProgressing = false;
+            }
+            else
+            {
+                AddStatus("Project configurations loaded successfully.");
+                AddStatus("Connecting to DocuSign API. Please wait...");
+                var request = new RestRequest("api/contract/auth");
+                request.Method = Method.GET;
+                var response = await client.GetAsync<object>(request);
+
+                try
+                {
+                    DocuSignAccessToken = JsonConvert.DeserializeObject<DocuSignAccessToken>(response.ToString());                   
+                }
+                catch
+                {
+                    var url = response.ToString().Replace("\"", "");
+                    WebPageDialog dialog = new WebPageDialog(GetService<RestApiService>(), url);
+                    dialog.Owner = Application.Current.MainWindow as MainWindow;
+                    dialog.ShowDialog();
+
+                    if (dialog.DialogResult == true)
+                    {
+                        DocuSignAccessToken = await AccessDocuSign();
+                        AddStatus("Server connection completed successfully.");
+                        dialog.Close();
+                    }
+                }
+              
+            }
+        }
+
+        private async Task<DocuSignAccessToken> AccessDocuSign()
+        {
+            var request = new RestRequest("api/contract/access");
+            return await client.GetAsync<DocuSignAccessToken>(request);
+        }
+    }
+}
